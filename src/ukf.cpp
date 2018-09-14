@@ -1,6 +1,8 @@
 #include "ukf.h"
 #include "Eigen/Dense"
 #include <iostream>
+#include <fstream>
+#include <iomanip>
 
 using namespace std;
 using Eigen::MatrixXd;
@@ -28,7 +30,7 @@ UKF::UKF() {
   std_a_ = 3;
 
   // Process noise standard deviation yaw acceleration in rad/s^2
-  std_yawdd_ = 3;
+  std_yawdd_ = 3.14/3;
   
   //DO NOT MODIFY measurement noise values below these are provided by the sensor manufacturer.
   // Laser measurement noise standard deviation position1 in m
@@ -122,9 +124,6 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
     return;
   }
 
-  if (meas_package.sensor_type_ == MeasurementPackage::LASER)
-    return;
-
   //compute the time elapsed between the current and previous measurements
 	float dt = (meas_package.timestamp_ - time_us_) / 1000000.0;	//dt - expressed in seconds
 	time_us_ = meas_package.timestamp_;
@@ -135,7 +134,14 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
   if (dt > 0){
     Prediction(dt);
   }
-  UpdateRadar(meas_package);
+
+  if (use_radar_ && meas_package.sensor_type_ == MeasurementPackage::RADAR){
+    UpdateRadar(meas_package);
+  }
+
+  else if (use_laser_ && meas_package.sensor_type_ == MeasurementPackage::LASER){
+    UpdateLidar(meas_package);
+  }
 }
 
 /**
@@ -268,6 +274,97 @@ void UKF::UpdateLidar(MeasurementPackage meas_package) {
 
   You'll also need to calculate the lidar NIS.
   */
+
+  //set measurement dimension, radar can measure r, phi, and r_dot
+  int n_z = 4;
+
+  //create matrix for sigma points in measurement space
+  MatrixXd Zsig = MatrixXd(n_z, 2 * n_aug_ + 1);
+  for (int i = 0; i < 2 * n_aug_ + 1; i++) {  //2n+1 simga points
+
+    // measurement model
+    Zsig(0,i) = Xsig_pred_(0,i);
+    Zsig(1,i) = Xsig_pred_(1,i);
+    Zsig(2,i) = Xsig_pred_(2,i);
+    Zsig(3,i) = Xsig_pred_(3,i);
+  }
+
+  //mean predicted measurement
+  VectorXd z_pred = VectorXd(n_z);
+  z_pred.fill(0.0);
+  for (int i=0; i < 2*n_aug_+1; i++) {
+      z_pred = z_pred + weights_(i) * Zsig.col(i);
+  }
+
+  //innovation covariance matrix S
+  MatrixXd S = MatrixXd(n_z,n_z);
+  S.fill(0.0);
+  for (int i = 0; i < 2 * n_aug_ + 1; i++) {  //2n+1 simga points
+    //residual
+    VectorXd z_diff = Zsig.col(i) - z_pred;
+
+    //angle normalization
+    while (z_diff(1)> M_PI) z_diff(1)-=2.*M_PI;
+    while (z_diff(1)<-M_PI) z_diff(1)+=2.*M_PI;
+
+    S = S + weights_(i) * z_diff * z_diff.transpose();
+  }
+
+  //add measurement noise covariance matrix
+  MatrixXd R = MatrixXd(n_z,n_z);
+  R <<    std_laspx_*std_laspx_, 0, 0, 0,
+          0, std_laspy_*std_laspy_, 0, 0,
+          0, 0, std_a_*std_a_, 0,
+          0, 0, 0, std_yawdd_*std_yawdd_;
+  S = S + R;
+
+  //create matrix for cross correlation Tc
+  MatrixXd Tc = MatrixXd(n_x_, n_z);
+
+  //calculate cross correlation matrix
+  Tc.fill(0.0);
+  for (int i = 0; i < 2 * n_aug_ + 1; i++) {  //2n+1 simga points
+
+    //residual
+    VectorXd z_diff = Zsig.col(i) - z_pred;
+    //angle normalization
+    while (z_diff(1)> M_PI) z_diff(1)-=2.*M_PI;
+    while (z_diff(1)<-M_PI) z_diff(1)+=2.*M_PI;
+
+    // state difference
+    VectorXd x_diff = Xsig_pred_.col(i) - x_;
+    //angle normalization
+    while (x_diff(3)> M_PI) x_diff(3)-=2.*M_PI;
+    while (x_diff(3)<-M_PI) x_diff(3)+=2.*M_PI;
+
+    Tc = Tc + weights_(i) * x_diff * z_diff.transpose();
+  }
+
+  //Kalman gain K;
+  MatrixXd K = Tc * S.inverse();
+
+  VectorXd z = VectorXd(n_z);
+  z << meas_package.raw_measurements_[0],
+       meas_package.raw_measurements_[1],
+       0,
+       0;
+  
+  //residual
+  VectorXd z_diff = z - z_pred;
+
+  //angle normalization
+  while (z_diff(1)> M_PI) z_diff(1)-=2.*M_PI;
+  while (z_diff(1)<-M_PI) z_diff(1)+=2.*M_PI;
+
+  //update state mean and covariance matrix
+  x_ = x_ + K * z_diff;
+  P_ = P_ - K*S*K.transpose();
+
+  double nis = z_diff.transpose()*S.inverse()*z_diff;
+  // ofstream myfile;
+  // myfile.open ("nis_lidar.csv", ios::app);
+  // myfile << std::setprecision(12) << nis << std::endl;
+  // myfile.close();
 }
 
 /**
@@ -376,4 +473,10 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
   //update state mean and covariance matrix
   x_ = x_ + K * z_diff;
   P_ = P_ - K*S*K.transpose();
+
+  double nis = z_diff.transpose()*S.inverse()*z_diff;
+  // ofstream myfile;
+  // myfile.open ("nis_radar.csv", ios::app);
+  // myfile << std::setprecision(12) << nis << std::endl;
+  // myfile.close();
 }
